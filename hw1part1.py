@@ -14,21 +14,12 @@ def extract_hour(time):
         array (float64): series of input dimension with hour information.  
           Should only take on integer values in 0-23
     """
-    def _hour(x):
-        if pd.isna(x):
-            return np.nan
-        try:
-            parts = str(x).split(":")
-            if len(parts) != 3:
-                return np.nan
-            h = int(parts[0]); m = int(parts[1]); s = int(parts[2])
-            if 0 <= h <= 23 and 0 <= m <= 59 and 0 <= s <= 59:
-                return float(h)
-        except Exception:
-            pass
-        return np.nan
+    hours = (time // 100)
+    hours.astype(float)
+    hours = hours.where((hours >= 0) & (hours <= 23), np.nan)
     
-    return time.apply(_hour).astype("float64")
+    return hours
+
 
 # 2% credit
 def extract_mins(time):
@@ -43,21 +34,11 @@ def extract_mins(time):
         array (float64): series of input dimension with minute information.  
           Should only take on integer values in 0-59
     """
-    def _mins(x):
-        if pd.isna(x):
-            return np.nan
-        try:
-            parts = str(x).split(":")
-            if len(parts) != 3:
-                return np.nan
-            h = int(parts[0]); m = int(parts[1]); s = int(parts[2])
-            if 0 <= h <= 23 and 0 <= m <= 59 and 0 <= s <= 59:
-                return float(m)
-        except Exception:
-            pass
-        return np.nan
+    time = time.where((time >= 0) & (time < 2400), np.nan)
+    mins = (time % 100).astype(float)
+    mins = mins.where((mins >= 0) & (mins < 60), np.nan)
     
-    return time.apply(_mins).astype("float64")
+    return mins
 
 # 2% credit
 def convert_to_minofday(time):
@@ -73,24 +54,19 @@ def convert_to_minofday(time):
     
     Example: 13:03 is converted to 783.0
     """
-    def _conv(s):
-        if pd.isna(s):
-            return np.nan
-        try:
-            parts = str(s).split(":")
-            if len(parts) != 3:
-                return np.nan
-            h, m, sec = map(int, parts)
-            # Adding this bcoz 24:00:00 is not valid
-            if h == 24 and m == 0 and sec == 0:
-                return np.nan
-            if 0 <= h <= 23 and 0 <= m <= 59 and 0 <= sec <= 59:
-                return float(h * 60 + m)
-        except Exception:
-            return np.nan
-        return np.nan
     
-    return time_strs.apply(_conv).astype("float64")
+    time_parts = time.str.extract(r'(?P<h>\d+):(?P<m>\d+):(?P<s>\d+)')
+    hours = time_parts['h'].astype(float)
+    minutes = time_parts['m'].astype(float)
+    seconds = time_parts['s'].astype(float)
+    
+    
+    total_minutes = (hours * 60.0) + minutes
+    mask = (hours.between(0, 23)) & (minutes.between(0, 59)) & (seconds.between(0, 59))
+    total_minutes = total_minutes.where(mask, np.nan)
+    
+    return total_minutes
+    
 
 # 3%credit
 def assigned_scheduled_times(arrival_times, scheduled_times):
@@ -104,35 +80,44 @@ def assigned_scheduled_times(arrival_times, scheduled_times):
     Returns:
         arrival_scheduled_times: pandas dataframe with two columns viz., arrival times and corresponding scheduled time
     """
-    
-    actual = pd.Series(arrival_times, dtype="float64")
-    
     # insert code to find the closest scheduled time for each arrival time in arrival_times
-    scheduled = pd.Series(scheduled_times, dtype="float64").dropna().sort_values().to_numpy()
-    if scheduled.size == 0:
-        return pd.DataFrame({"Arrival Times": actual, "Scheduled Times": np.nan})
-    #I'm gonna binary search for nearest schedule time for each arrival
-    idx = np.searchsorted(sched, actual.to_numpy())
-    left_idx = np.clip(idx - 1, 0, sched.size - 1)
-    right_idx = np.clip(idx, 0, sched.size - 1)
+    
+    actual = arrival_times.values.astype(int)
+    scheduled = []
 
-    left_vals = sched[left_idx]
-    right_vals = sched[right_idx]
+    _sched_vals = scheduled_times.values
 
+    for a in actual:
+        diffs = np.abs(_sched_vals - a)
+        min_diff = diffs.min()
+        closest_idx = np.where(diffs == min_diff)[0]
+        
+        tie_key = (_sched_vals[closest_idx] < a).astype(int)
+        
+        _pick_pos = np.lexsort((tie_key,))[:1][0]
+        idx = closest_idx[_pick_pos]
+        
+        chosen = _sched_vals[idx]
 
-    choose_right = (np.abs(right_vals - actual) < np.abs(left_vals - actual))
-    assigned = np.where(choose_right, right_vals, left_vals)
-
-    assigned = pd.Series(assigned, index=actual.index)
-    assigned[actual.isna()] = np.nan
-
-
+        scheduled.append(chosen)
+    
     return pd.DataFrame({
-        "Arrival Times": actual,
-        "Scheduled Times": assigned
+    'Arrival Times': actual,
+    'Scheduled Times': scheduled_assigned
     })
 
+
 # 3% credit
+"""
+def conv_to_mins(time):
+    mins = time%100
+    hrs = time//100
+    if (hrs<0) or (hrs>23):
+        return np.nan
+    if (mins<0) or (mins>59):
+        return np.nan
+    return ((60*hrs)+ mins)
+"""
 def calc_delay(assigned_scheduled_times):
     """
     Calculates delay times y - x
@@ -143,16 +128,22 @@ def calc_delay(assigned_scheduled_times):
     Returns: 
         pandas series of input dimension with delay time
     """
+    if assigned_scheduled_times.shape[1] != 2:
+        raise ValueError("Input DataFrame must have exactly 2 columns: scheduled and actual times")
     
-    df = assigned_scheduled_times
-    print(df)
+    def hhmm_to_minutes(hhmm):
+        """Convert numeric HHMM to minutes since midnight."""
+        str_val = str(int(hhmm)).zfill(4)
+        hours, minutes = int(str_val[:2]), int(str_val[2:])
+        
+        if not (0 <= hours < 24 and 0 <= minutes < 60):
+            return np.nan
     
+        return hours * 60 + minutes
+        
+        scheduled_minutes = assigned_scheduled_times.iloc[:, 0].map(hhmm_to_minutes)
+        actual_minutes = assigned_scheduled_times.iloc[:, 1].map(hhmm_to_minutes)
+        
+        delay = actual_minutes.subtract(scheduled_minutes)
 
-    if 'Arrival Times' in df.columns and 'Scheduled Times' in df.columns:
-        scheduled = df['Scheduled Times']
-        actual = df['Arrival Times']
-    else:
-        scheduled = df.iloc[:, 0]
-        actual = df.iloc[:, 1]
-      
-    return (actual.astype('float64') - scheduled.astype('float64')).astype('float64')
+        return delay
